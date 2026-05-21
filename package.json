@@ -1,0 +1,16 @@
+{
+  "name": "backbase-boat-ais-proxy",
+  "version": "1.0.0",
+  "description": "WebSocket proxy between browser PWAs and stream.aisstream.io. Bypasses upstream cert validation (aisstream.io's Let's Encrypt cert expired May 2026, see https://github.com/aisstream/issues/issues/192) and keeps the AISSTREAM_API_KEY server-side so it never leaks to the browser bundle.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
