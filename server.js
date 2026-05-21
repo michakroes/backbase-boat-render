@@ -191,6 +191,9 @@ const server = http.createServer((req, res) => {
   }
   if (req.url === '/' || req.url === '/health') {
     res.writeHead(200, Object.assign({ 'content-type': 'application/json' }, CORS_HEADERS));
+    // locWss is defined below but available at request time since /health
+    // is never hit before the server has fully booted.
+    const locClients = (typeof locWss !== 'undefined' && locWss) ? locWss.clients.size : 0;
     res.end(JSON.stringify({
       ok: true,
       service: 'backbase-boat-ais-proxy',
@@ -198,6 +201,11 @@ const server = http.createServer((req, res) => {
       strictTls: REJECT_UPSTREAM_CERT,
       uptimeSec: Math.round(process.uptime()),
       upstreamCert: _certProbe,
+      locationBroadcast: {
+        clients: locClients,
+        lastCaptainFixTs: _lastCaptainFixServerTs,
+        hasFix: !!_lastCaptainFix,
+      },
     }));
     return;
   }
@@ -210,7 +218,11 @@ const server = http.createServer((req, res) => {
 // Trade-off: more upstream sockets vs. simpler code. For our scale (handful
 // of users on a boat trip) this is the right call - one shared upstream
 // would need more reconnect logic and broadcast plumbing.
-const wss = new WebSocket.Server({ server, path: '/ais' });
+//
+// Multi-path upgrade routing: with two WS servers on one HTTP server, you
+// CANNOT pass {server, path} to both - the second WebSocket.Server overrides
+// the upgrade handler of the first. Use noServer:true + manual route.
+const wss = new WebSocket.Server({ noServer: true });
 
 wss.on('connection', (browser, req) => {
   const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '?';
@@ -284,8 +296,112 @@ wss.on('connection', (browser, req) => {
   });
 });
 
+// ── Location broadcast: captain -> passengers ──────────────────────────────
+//
+// Lets the captain phone (the one logged into live.html or live-mapbox.html
+// in captain mode) broadcast its GPS position to all passengers (the phones
+// that scanned the QR code and opened the passenger view). Without this,
+// every phone read its own GPS - which works because they were all on the
+// same boat, but breaks the moment one passenger phone's GPS is flaky.
+//
+// Wire protocol (JSON over WebSocket at /location):
+//   Client -> Server:
+//     { type: 'captain-update', position: { lat, lng, heading?, sog?, accuracy?, ts? } }
+//       Sent by the captain on every onGpsFix. ts is ms since epoch.
+//   Server -> Client (broadcast to all connected):
+//     { type: 'captain-fix', position: {...}, serverTs: ms }
+//       Sent on every captain-update + immediately on a new client connect
+//       (replays the last known position so a late passenger sees the boat
+//       right away).
+//
+// Authentication: none for v1. The boat trip is closed group (8 phones on
+// 1 boat) and the WS path is unguessable enough. Future hardening: a trip
+// token in the query string + check at upgrade.
+//
+// State: kept in memory only. If the server restarts, the next captain
+// update repopulates within ~1s.
+const locWss = new WebSocket.Server({ noServer: true });
+
+// Single upgrade handler that routes /ais to wss and /location to locWss.
+// Anything else gets a clean socket destroy (no protocol confusion).
+server.on('upgrade', (req, socket, head) => {
+  const url = req.url || '/';
+  const pathname = url.split('?')[0];
+  if (pathname === '/ais') {
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+  } else if (pathname === '/location') {
+    locWss.handleUpgrade(req, socket, head, (ws) => locWss.emit('connection', ws, req));
+  } else {
+    socket.destroy();
+  }
+});
+
+let _lastCaptainFix = null;          // { lat, lng, heading, sog, accuracy, ts }
+let _lastCaptainFixServerTs = null;  // server-side receive timestamp (ms)
+
+function broadcastCaptainFix(payload) {
+  const message = JSON.stringify({
+    type: 'captain-fix',
+    position: payload,
+    serverTs: _lastCaptainFixServerTs,
+  });
+  for (const client of locWss.clients) {
+    if (client.readyState === WebSocket.OPEN) {
+      try { client.send(message); } catch (e) { /* ignore */ }
+    }
+  }
+}
+
+locWss.on('connection', (ws, req) => {
+  const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '?';
+  const clientId = Math.random().toString(36).slice(2, 8);
+  console.log(`[loc:${clientId}] client connected from ${clientIp} (total=${locWss.clients.size})`);
+
+  // Replay the last known position immediately so a passenger joining mid-trip
+  // sees the boat without waiting for the next captain GPS fix.
+  if (_lastCaptainFix) {
+    try {
+      ws.send(JSON.stringify({
+        type: 'captain-fix',
+        position: _lastCaptainFix,
+        serverTs: _lastCaptainFixServerTs,
+      }));
+    } catch (e) { /* ignore */ }
+  }
+
+  ws.on('message', (raw) => {
+    let msg;
+    try { msg = JSON.parse(raw.toString()); } catch (e) { return; }
+    if (msg && msg.type === 'captain-update' && msg.position
+        && typeof msg.position.lat === 'number'
+        && typeof msg.position.lng === 'number') {
+      // Sanity-check the coordinates: Amsterdam-area bbox roughly + some
+      // slack for accidental NaN. Out-of-range payloads silently drop.
+      const { lat, lng } = msg.position;
+      if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return;
+      _lastCaptainFix = {
+        lat, lng,
+        heading: typeof msg.position.heading === 'number' ? msg.position.heading : null,
+        sog: typeof msg.position.sog === 'number' ? msg.position.sog : null,
+        accuracy: typeof msg.position.accuracy === 'number' ? msg.position.accuracy : null,
+        ts: typeof msg.position.ts === 'number' ? msg.position.ts : Date.now(),
+      };
+      _lastCaptainFixServerTs = Date.now();
+      broadcastCaptainFix(_lastCaptainFix);
+    }
+  });
+
+  ws.on('close', () => {
+    console.log(`[loc:${clientId}] disconnected (total=${locWss.clients.size - 1})`);
+  });
+  ws.on('error', (err) => {
+    console.warn(`[loc:${clientId}] error: ${err.message}`);
+  });
+});
+
 server.listen(PORT, () => {
   console.log(`[ais-proxy] listening on :${PORT}`);
   console.log(`[ais-proxy] upstream: ${UPSTREAM_URL}`);
   console.log(`[ais-proxy] strict TLS: ${REJECT_UPSTREAM_CERT}`);
+  console.log('[ais-proxy] paths: /ais (AIS relay), /location (captain broadcast)');
 });
