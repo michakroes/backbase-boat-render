@@ -34,19 +34,137 @@
 //   - All upstream messages get relayed verbatim to the browser.
 
 const http = require('node:http');
+const tls = require('node:tls');
 const WebSocket = require('ws');
 
 const PORT = process.env.PORT || 8080;
 const API_KEY = process.env.AISSTREAM_API_KEY;
 const UPSTREAM_URL = 'wss://stream.aisstream.io/v0/stream';
+const UPSTREAM_HOST = 'stream.aisstream.io';
+const UPSTREAM_PORT = 443;
 // REJECT_UPSTREAM_CERT=1 toggles strict TLS back on (set this once aisstream
 // renews their cert). Default false = bypass active.
 const REJECT_UPSTREAM_CERT = process.env.REJECT_UPSTREAM_CERT === '1';
+// Probe interval - every 15 min we check whether aisstream has renewed their
+// cert. Fast enough to notice within a deploy-cycle of theirs, slow enough
+// to be polite (~96 connections/day, nothing).
+const CERT_PROBE_INTERVAL_MS = 15 * 60 * 1000;
+const CERT_PROBE_TIMEOUT_MS = 10 * 1000;
 
 if (!API_KEY) {
   console.error('FATAL: AISSTREAM_API_KEY environment variable not set');
   process.exit(1);
 }
+
+// ── Upstream cert probe ─────────────────────────────────────────────────────
+//
+// Periodically opens a plain TLS socket (not WebSocket) to aisstream.io with
+// rejectUnauthorized:false so we ALWAYS get the peer cert, even if it's
+// expired. We then read socket.authorized (boolean) + socket.authorizationError
+// (specific reason) to determine whether strict TLS would have worked.
+//
+// The result is cached in _certProbe and exposed via /health so status.html
+// can show "cert expired (1d ago)" while the bypass is active, and flip to
+// "cert valid until Aug 15 2026" the moment aisstream renews.
+//
+// Why not just probe on every /health request? Because health is hit ~1/s by
+// status.html in auto-refresh mode and we don't want to spam aisstream with
+// TLS handshakes. 15 min cadence is responsive enough for a manual operator
+// to notice the renewal within a workday.
+let _certProbe = {
+  ok: false,
+  error: 'not yet probed',
+  notAfter: null,
+  notBefore: null,
+  issuer: null,
+  daysUntilExpiry: null,
+  lastChecked: null,
+  probeDurationMs: null,
+};
+
+function probeUpstreamCert() {
+  return new Promise((resolve) => {
+    const startedAt = Date.now();
+    let settled = false;
+    const settle = (result) => {
+      if (settled) return;
+      settled = true;
+      result.lastChecked = new Date(startedAt).toISOString();
+      result.probeDurationMs = Date.now() - startedAt;
+      resolve(result);
+    };
+
+    const socket = tls.connect({
+      host: UPSTREAM_HOST,
+      port: UPSTREAM_PORT,
+      servername: UPSTREAM_HOST,
+      rejectUnauthorized: false,    // allow connection so we can READ the bad cert
+      timeout: CERT_PROBE_TIMEOUT_MS,
+    }, () => {
+      const cert = socket.getPeerCertificate() || {};
+      // valid_to/valid_from are formatted like "May 20 10:59:33 2026 GMT".
+      // Convert to ISO + days-until-expiry so the client doesn't have to
+      // parse the unusual format.
+      const notAfterMs = cert.valid_to ? Date.parse(cert.valid_to) : NaN;
+      const notBeforeMs = cert.valid_from ? Date.parse(cert.valid_from) : NaN;
+      const daysUntilExpiry = !isNaN(notAfterMs)
+        ? Math.round((notAfterMs - Date.now()) / 86400000)
+        : null;
+      // Issuer fields differ per CA - prefer CN (e.g. "R12"), fall back to O.
+      const issuer = cert.issuer
+        ? (cert.issuer.CN || cert.issuer.O || null)
+        : null;
+      try { socket.end(); } catch (e) {}
+      settle({
+        ok: !!socket.authorized,
+        error: socket.authorizationError ? String(socket.authorizationError) : null,
+        notAfter: !isNaN(notAfterMs) ? new Date(notAfterMs).toISOString() : null,
+        notBefore: !isNaN(notBeforeMs) ? new Date(notBeforeMs).toISOString() : null,
+        issuer,
+        daysUntilExpiry,
+      });
+    });
+
+    socket.on('error', (err) => {
+      settle({
+        ok: false,
+        error: err.message || String(err),
+        notAfter: null,
+        notBefore: null,
+        issuer: null,
+        daysUntilExpiry: null,
+      });
+    });
+    socket.on('timeout', () => {
+      try { socket.destroy(); } catch (e) {}
+      settle({
+        ok: false,
+        error: 'timeout after ' + CERT_PROBE_TIMEOUT_MS + 'ms',
+        notAfter: null,
+        notBefore: null,
+        issuer: null,
+        daysUntilExpiry: null,
+      });
+    });
+  });
+}
+
+function refreshCertProbe() {
+  return probeUpstreamCert().then((result) => {
+    _certProbe = result;
+    const verdict = result.ok ? 'OK'
+      : (result.error ? 'BAD: ' + result.error : 'UNKNOWN');
+    const expiry = result.notAfter
+      ? ' (expires ' + result.notAfter + ', ' + result.daysUntilExpiry + 'd)'
+      : '';
+    console.log('[cert-probe] ' + verdict + expiry);
+    return result;
+  });
+}
+
+// Boot probe + recurring probe.
+refreshCertProbe();
+setInterval(refreshCertProbe, CERT_PROBE_INTERVAL_MS).unref();
 
 // ── HTTP server: health check + WebSocket upgrade endpoint ─────────────────
 //
@@ -79,6 +197,7 @@ const server = http.createServer((req, res) => {
       upstream: UPSTREAM_URL,
       strictTls: REJECT_UPSTREAM_CERT,
       uptimeSec: Math.round(process.uptime()),
+      upstreamCert: _certProbe,
     }));
     return;
   }
