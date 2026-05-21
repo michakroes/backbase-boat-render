@@ -49,9 +49,30 @@ if (!API_KEY) {
 }
 
 // ── HTTP server: health check + WebSocket upgrade endpoint ─────────────────
+//
+// CORS: /health is hit cross-origin by status.html on backbase-boat.netlify.app
+// (and share.backbase.com). Without Access-Control-Allow-Origin the browser
+// blocks the response body and status.html shows the proxy as "down" even
+// though it returned 200. We allow any origin because /health exposes no
+// sensitive data (just uptime + config flags) and the WS endpoint has its
+// own auth model (API key injected server-side). OPTIONS preflight is
+// answered too in case a caller sends custom headers.
+const CORS_HEADERS = {
+  'access-control-allow-origin': '*',
+  'access-control-allow-methods': 'GET, OPTIONS',
+  'access-control-allow-headers': 'Content-Type',
+  'access-control-max-age': '600',
+  'cache-control': 'no-store',
+};
+
 const server = http.createServer((req, res) => {
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, CORS_HEADERS);
+    res.end();
+    return;
+  }
   if (req.url === '/' || req.url === '/health') {
-    res.writeHead(200, { 'content-type': 'application/json' });
+    res.writeHead(200, Object.assign({ 'content-type': 'application/json' }, CORS_HEADERS));
     res.end(JSON.stringify({
       ok: true,
       service: 'backbase-boat-ais-proxy',
@@ -61,7 +82,7 @@ const server = http.createServer((req, res) => {
     }));
     return;
   }
-  res.writeHead(404);
+  res.writeHead(404, CORS_HEADERS);
   res.end('not found');
 });
 
