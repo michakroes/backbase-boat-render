@@ -27,7 +27,7 @@ Browser  --wss-- this proxy on Render --wss-- stream.aisstream.io
    - **Instance Type**: Free
 4. **Environment Variables**:
    - `AISSTREAM_API_KEY` = your aisstream API key
-   - `REJECT_UPSTREAM_CERT` = `1` (set this once the aisstream cert is renewed - not now)
+   - `REJECT_UPSTREAM_CERT` = `0` ONLY if you need to temporarily bypass strict TLS again (default is ON since 2026-05-25)
 5. Create Web Service. Render builds + deploys automatically (~2-3 min).
 
 ## Local dev
@@ -65,4 +65,9 @@ ws.onopen = () => {
 
 ## Cert future
 
-Once aisstream renews their cert -> in the Render dashboard set env var `REJECT_UPSTREAM_CERT=1` -> restart -> back to strict TLS verification. No code change needed.
+Strict TLS verification is now ON by default (since 2026-05-25, after
+aisstream renewed their cert). If aisstream's cert ever lapses again, set
+`REJECT_UPSTREAM_CERT=0` in the Render dashboard as a temporary bypass and
+flip it back to unset (or to `1`) once they renew. The status.html page
+('AIS upstream cert' card) shows the cert state - 'cert OK' means strict is
+active, 'cert expired' means the bypass should be enabled.

@@ -42,9 +42,11 @@ const API_KEY = process.env.AISSTREAM_API_KEY;
 const UPSTREAM_URL = 'wss://stream.aisstream.io/v0/stream';
 const UPSTREAM_HOST = 'stream.aisstream.io';
 const UPSTREAM_PORT = 443;
-// REJECT_UPSTREAM_CERT=1 toggles strict TLS back on (set this once aisstream
-// renews their cert). Default false = bypass active.
-const REJECT_UPSTREAM_CERT = process.env.REJECT_UPSTREAM_CERT === '1';
+// Strict TLS verification on the upstream connection to aisstream. Default
+// is now ON (cert chain validated) since aisstream renewed their Let's
+// Encrypt cert in 2026-05. Set REJECT_UPSTREAM_CERT=0 explicitly to disable
+// (temporary bypass for the next time their cert lapses without warning).
+const REJECT_UPSTREAM_CERT = process.env.REJECT_UPSTREAM_CERT !== '0';
 // Probe interval - every 15 min we check whether aisstream has renewed their
 // cert. Fast enough to notice within a deploy-cycle of theirs, slow enough
 // to be polite (~96 connections/day, nothing).
