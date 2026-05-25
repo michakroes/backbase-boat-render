@@ -1,34 +1,34 @@
 # backbase-boat-render
 
-WebSocket-proxy tussen de [backbase-boat](https://github.com/michakroes/backbase-boat) PWA en `wss://stream.aisstream.io`.
+WebSocket proxy between the [backbase-boat](https://github.com/michakroes/backbase-boat) PWA and `wss://stream.aisstream.io`.
 
-## Waarom dit ding bestaat
+## Why this thing exists
 
-1. **API key beveiliging**: voorheen stond de aisstream API key in `live-ais.js`, dus zichtbaar in de deployed bundle. Nu staat 'ie in een env var op deze server. De browser stuurt subscribe-messages *zonder* key; deze proxy injecteert de key voor 'm.
+1. **API key protection**: previously the aisstream API key sat in `live-ais.js`, so it was visible in the deployed bundle. It now lives in an env var on this server. The browser sends subscribe messages *without* the key; this proxy injects the key on its behalf.
 
-2. **Cert bypass**: aisstream's Let's Encrypt cert is verlopen op 2026-05-20 (zie https://github.com/aisstream/issues/issues/192). Browsers kunnen TLS-validatie niet uitschakelen, Node wel via `rejectUnauthorized: false`. We doen dat alleen voor de upstream-connectie naar aisstream; de downstream (browser ↔ proxy) gebruikt Render's eigen geldige cert.
+2. **Cert bypass**: aisstream's Let's Encrypt cert expired on 2026-05-20 (see https://github.com/aisstream/issues/issues/192). Browsers cannot disable TLS validation, Node can via `rejectUnauthorized: false`. We only do that for the upstream connection to aisstream; the downstream (browser to proxy) uses Render's own valid cert.
 
-## Architectuur
+## Architecture
 
 ```
-Browser  ──wss── this proxy on Render ──wss── stream.aisstream.io
-         (Render cert,                     (rejectUnauthorized: false
-          valid Let's Encrypt)              tot aisstream cert renewt)
+Browser  --wss-- this proxy on Render --wss-- stream.aisstream.io
+         (Render cert,                       (rejectUnauthorized: false
+          valid Let's Encrypt)                until aisstream cert renews)
 ```
 
-## Deploy op Render
+## Deploy on Render
 
-1. Render dashboard → **New** → **Web Service**
+1. Render dashboard -> **New** -> **Web Service**
 2. Connect repo: `michakroes/backbase-boat-render`
-3. Settings (default, niks aanpassen):
-   - **Root Directory**: leeg (alles staat in root)
+3. Settings (defaults, leave alone):
+   - **Root Directory**: empty (everything lives at the repo root)
    - **Build Command**: `npm install`
    - **Start Command**: `npm start`
    - **Instance Type**: Free
 4. **Environment Variables**:
-   - `AISSTREAM_API_KEY` = jouw aisstream API key
-   - `REJECT_UPSTREAM_CERT` = `1` (zet pas zodra aisstream cert vernieuwd is — niet nu)
-5. Create Web Service. Render bouwt + deployt automatisch (~2-3 min).
+   - `AISSTREAM_API_KEY` = your aisstream API key
+   - `REJECT_UPSTREAM_CERT` = `1` (set this once the aisstream cert is renewed - not now)
+5. Create Web Service. Render builds + deploys automatically (~2-3 min).
 
 ## Local dev
 
@@ -36,17 +36,17 @@ Browser  ──wss── this proxy on Render ──wss── stream.aisstream.i
 git clone git@github.com:michakroes/backbase-boat-render.git
 cd backbase-boat-render
 npm install
-AISSTREAM_API_KEY=jouw_key npm start
+AISSTREAM_API_KEY=your_key npm start
 ```
 
-Server start op `http://localhost:8080`. WebSocket endpoint: `ws://localhost:8080/ais`. Health check: `GET /health`.
+Server runs on `http://localhost:8080`. WebSocket endpoint: `ws://localhost:8080/ais`. Health check: `GET /health`.
 
-## Hoe de PWA hem gebruikt
+## How the PWA uses it
 
-In `config.local.js` (van het backbase-boat repo):
+In `config.local.js` (from the backbase-boat repo):
 
 ```js
-window.AIS_PROXY_URL = 'wss://<jouw-render-naam>.onrender.com/ais';
+window.AIS_PROXY_URL = 'wss://<your-render-name>.onrender.com/ais';
 ```
 
 In `live-ais.js`:
@@ -58,11 +58,11 @@ ws.onopen = () => {
   ws.send(JSON.stringify({
     BoundingBoxes: [[52.34, 4.82], [52.42, 4.97]],
     FilterMessageTypes: ['PositionReport', 'StandardClassBPositionReport', ...]
-    // NB: GEEN APIKey field — proxy injecteert 'm server-side.
+    // NB: NO APIKey field - the proxy injects it server-side.
   }));
 };
 ```
 
-## Cert toekomst
+## Cert future
 
-Zodra aisstream hun cert vernieuwt → in Render dashboard env var `REJECT_UPSTREAM_CERT=1` zetten → herstart → terug naar strikte TLS verificatie. Geen code-wijziging nodig.
+Once aisstream renews their cert -> in the Render dashboard set env var `REJECT_UPSTREAM_CERT=1` -> restart -> back to strict TLS verification. No code change needed.
